@@ -2,7 +2,10 @@
 name = "cad-crate"
 version = "0.1.0"
 edition = "2021"
-description = "Git-ähnliche Versionskontrolle für CAD-Daten (WAL + inhaltsadressierte Blobs)"
+description = "Version control for CAD data: content-defined chunking, content-addressed storage and a CAS-linearized write-ahead log"
+authors = ["Nicolas Wörmann"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nic0016/crate"
 
 [[bin]]
 name = "crate"

@@ -1,168 +1,321 @@
 # crate
 
-Versionskontrolle für CAD-Daten – wie Git, aber für große Binärdateien wie SolidWorks-, Inventor-, CATIA- oder STEP-Dateien.
+**Version control for CAD data.** `crate` versions whole project folders of large binary files (SolidWorks, Inventor, CATIA, NX, STEP, …). It combines three ideas:
 
-- Jeder Commit speichert den kompletten Stand eines Ordners.
-- Große Dateien werden in Stücke zerlegt; bei kleinen Änderungen wird nur der geänderte Teil neu gespeichert.
-- Dateien können gesperrt werden, damit nicht zwei Personen gleichzeitig dieselbe Baugruppe bearbeiten.
-- Der Speicher kann auf einem Netzlaufwerk liegen, damit ein Team gemeinsam arbeitet.
+- **Content-defined chunking:** a small edit to a 500 MB assembly costs megabytes of storage, not another 500 MB.
+- **Content-addressed, immutable object storage:** deduplication, integrity checks and idempotent, resumable transfers come for free.
+- **A write-ahead log linearized by a single compare-and-swap:** several users can safely share one store, even on a plain network drive, with no server process.
+
+Collaboration is pessimistic and lock-based (check-out / check-in), as is usual for CAD. Distributed `push` / `pull` / `clone` are built on top.
+
+Author: **Nicolas Wörmann** · License: **MIT OR Apache-2.0**
+
+---
+
+## Contents
+
+1. [Installation](#installation)
+2. [Quick start](#quick-start)
+3. [Command reference](#command-reference)
+4. [Working in a team](#working-in-a-team)
+5. [Design](#design)
+6. [Limitations and roadmap](#limitations-and-roadmap)
+7. [Development](#development)
+8. [License](#license)
+
+---
 
 ## Installation
 
-Voraussetzung ist [Rust](https://rustup.rs). Unter Windows wird zusätzlich ein Linker benötigt: entweder die Visual Studio Build Tools (MSVC) oder MinGW, z. B. `winget install BrechtSanders.WinLibs.POSIX.UCRT`.
+`crate` is built from source with [Rust](https://rustup.rs). You also need a native linker.
 
-```bat
-cargo install --path .
+### Windows
+
+```powershell
+winget install Rustlang.Rustup
+```
+
+Then install a linker for your Rust toolchain:
+
+- **MSVC toolchain** (rustup default): Visual Studio Build Tools with the *Desktop development with C++* workload. The rustup installer offers to install them.
+- **GNU toolchain** (`x86_64-pc-windows-gnu`): MinGW-w64, e.g. `winget install BrechtSanders.WinLibs.POSIX.UCRT`. Its `bin` directory must be on `PATH`.
+
+Open a new terminal so `PATH` is refreshed, then:
+
+```powershell
+cargo install --git https://github.com/nic0016/crate
 crate --version
 ```
 
-`crate.exe` liegt danach in `%USERPROFILE%\.cargo\bin`.
+### macOS
 
-## Schnellstart
+```bash
+xcode-select --install                                           # Apple Command Line Tools (linker)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust
+source "$HOME/.cargo/env"
+cargo install --git https://github.com/nic0016/crate
+crate --version
+```
+
+The binary ends up in `%USERPROFILE%\.cargo\bin` (Windows) or `~/.cargo/bin` (macOS/Linux). From a local checkout, use `cargo install --path .` instead.
+
+---
+
+## Quick start
 
 ```bat
-cd "C:\Projekte\Mein Produkt"
+cd "C:\Projects\Gearbox"
 crate init
 crate status
-crate commit -m "Erster Stand"
+crate commit -m "Initial state"
+```
+
+`init` creates `.crate\` and a commented `.crateignore`. Your CAD files are not touched. `status` shows what would be versioned.
+
+Then, after editing files in your CAD program:
+
+```bat
+crate status
+crate diff
+crate commit -m "Bore 8 mm instead of 6 mm"
 crate log
 ```
 
-`crate init` legt den Unterordner `.crate` an. Die CAD-Dateien selbst bleiben unverändert. Wer `.crate` löscht, entfernt das Repo wieder.
+`status` lists new, modified and deleted files grouped by CAD category (assembly, part, drawing, …). `diff` adds the size deltas.
 
-## Typischer Ablauf
-
-```bat
-REM Datei im CAD-Programm ändern und speichern, dann:
-crate status
-crate diff
-crate commit -m "Bohrung 8 mm statt 6 mm"
-```
-
-### Alte Versionen zurückholen
+To go back in time:
 
 ```bat
-REM alte Version als Kopie ablegen (überschreibt nichts)
-crate restore Halter.SLDPRT -r HEAD~1 -o C:\Temp\Halter_alt.SLDPRT
+REM old version as a separate copy, nothing is overwritten
+crate restore Housing.SLDPRT -r HEAD~1 -o C:\Temp\Housing_old.SLDPRT
 
-REM Datei im Ordner auf eine ältere Version zurücksetzen
-crate restore Halter.SLDPRT -r HEAD~1
+REM overwrite the file in place
+crate restore Housing.SLDPRT -r HEAD~1
 
-REM ganzen Ordner auf eine Version setzen und wieder zurück
-crate checkout Freigabe-1.0
+REM whole folder to a tag, and back to the newest version
+crate checkout Release-1.0
 crate checkout latest
 ```
 
-Hinweise:
+Close the file in your CAD program before restoring it. `restore` without `-o` overwrites uncommitted changes without asking. To stop using `crate`, delete the `.crate` folder.
 
-- `restore` ohne `-o` überschreibt die Datei ohne Nachfrage. Noch nicht committete Änderungen gehen dabei verloren.
-- Datei vorher im CAD-Programm schließen.
-- Eine wiederhergestellte Datei ist erst nach einem neuen `commit` wieder Teil der Historie.
+---
 
-### Versionsangaben (`-r`, `checkout`, `diff`)
+## Command reference
 
-| Angabe | Bedeutung |
+Every command accepts `-C <DIR>` to run on another folder, e.g. `crate -C "C:\Projects\Gearbox" status`.
+
+### Local versioning
+
+| Command | Description |
 | --- | --- |
-| `HEAD` | Version, auf der der Arbeitsordner basiert |
-| `HEAD~2` | zwei Versionen davor |
-| `latest` / `main` | neueste Version im Speicher |
-| `3f2a…` | Commit-ID (die ersten Zeichen genügen) |
-| `Freigabe-1.0` | Tag |
+| `crate init [--store <PATH>]` | Create a repository in the current folder. `--store` puts the object store elsewhere, e.g. on a network share. |
+| `crate status` | Show new, modified and deleted files and current locks. |
+| `crate commit -m <MSG> [--force]` | Record a snapshot of the whole folder. Refuses if the working folder is not based on the latest version, or if changed files are locked by someone else (override with `--force`). |
+| `crate log [<PATH>] [-n <N>]` | Show history, optionally only commits that touched a file or folder. |
+| `crate diff [<FROM>] [<TO>]` | Compare two versions. Without arguments: latest commit against the working folder. |
+| `crate restore <PATH>… [-r <REV>] [-o <FILE>]` | Restore files from a version (default `HEAD`). `-o` writes a single file elsewhere instead of overwriting it. |
+| `crate checkout <REV> [--force]` | Set the whole folder to a version. Refuses if there are uncommitted changes (discard them with `--force`). Untracked files are left alone. |
+| `crate tag [<NAME> [<REV>]] [-d] [--force]` | List tags, create one (default `HEAD`), delete with `-d`, move with `--force`. |
 
-## Befehle
+### Locks
 
-| Befehl | Beschreibung |
+| Command | Description |
 | --- | --- |
-| `crate init [--store PFAD]` | Neues Repo anlegen, optional mit Speicher woanders, z. B. auf einem Netzlaufwerk |
-| `crate status` | Neue, geänderte und gelöschte Dateien anzeigen |
-| `crate commit -m "…" [--force]` | Aktuellen Stand als neue Version speichern |
-| `crate log [PFAD] [-n N]` | Versionsgeschichte, optional für eine Datei oder einen Ordner |
-| `crate diff [VON] [BIS]` | Zwei Versionen vergleichen (ohne Angabe: letzte Version gegen Arbeitsordner) |
-| `crate restore PFAD… [-r REV] [-o DATEI]` | Dateien aus einer Version wiederherstellen |
-| `crate checkout REV [--force]` | Ganzen Ordner auf eine Version setzen |
-| `crate tag [NAME] [REV] [-d]` | Tags auflisten, setzen oder löschen, z. B. für Freigaben |
-| `crate lock PFAD… [-m "…"]` | Dateien für andere sperren |
-| `crate unlock PFAD… [--force]` | Sperren aufheben |
-| `crate locks` | Alle Sperren anzeigen |
-| `crate verify [--full]` | Repo prüfen, mit `--full` alle Prüfsummen |
-| `crate wal [-n N]` | Write-Ahead-Log anzeigen |
-| `crate gc [--dry-run] [--grace MIN]` | Nicht mehr benötigte Objekte löschen |
-| `crate remote [add NAME URL \| remove NAME]` | Remotes auflisten, einrichten oder entfernen |
-| `crate push [REMOTE] [--force]` | Lokale Versionen und Tags hochladen (Standard: `origin`) |
-| `crate pull [REMOTE] [--keep-both \| --mine \| --theirs]` | Neue Versionen holen und den Arbeitsordner aktualisieren |
-| `crate clone URL [ORDNER]` | Remote in einen neuen Ordner kopieren |
+| `crate lock <PATH>… [-m <MSG>]` | Lock files so nobody else can commit changes to them. |
+| `crate unlock <PATH>… [--force]` | Release your locks. `--force` releases other users' locks. |
+| `crate locks` | List all locks with owner, time and message. |
 
-Mit `-C ORDNER` lässt sich jeder Befehl auf einen anderen Ordner anwenden, z. B. `crate -C "C:\Projekte\Mein Produkt" status`.
+### Remotes
 
-## Arbeiten im Team mit push und pull
+| Command | Description |
+| --- | --- |
+| `crate remote` | List configured remotes. |
+| `crate remote add <NAME> <URL>` | Add a remote (a local folder, UNC path or `file://` URL). |
+| `crate remote remove <NAME>` | Remove a remote from the configuration. Data at the remote is kept. |
+| `crate push [<REMOTE>] [--force]` | Upload local commits and tags (default remote `origin`). `--force` only overrides foreign locks; it never rewrites remote history. |
+| `crate pull [<REMOTE>] [--keep-both \| --mine \| --theirs]` | Fetch new commits, rebase local ones and update the working folder. The flags resolve conflicts (see below). |
+| `crate clone <URL> [<DIR>]` | Create a new working folder from a remote. |
 
-Wie bei Git hat jeder eine vollständige lokale Kopie und committet zuerst lokal, auch offline. Mit `push` und `pull` wird mit einem gemeinsamen Remote abgeglichen. Ein Remote ist bisher ein Ordner, lokal oder auf einem Netzlaufwerk.
+### Maintenance
+
+| Command | Description |
+| --- | --- |
+| `crate verify [--full]` | Replay the WAL and compare it with the index, check that all referenced objects exist. `--full` reads every chunk and verifies its hash. |
+| `crate wal [-n <N>]` | Print the write-ahead log. |
+| `crate gc [--dry-run] [--grace <MIN>]` | Delete unreferenced objects older than the grace period (default 60 min). |
+
+### Revisions
+
+| Syntax | Meaning |
+| --- | --- |
+| `HEAD` | The version the working folder is based on |
+| `HEAD~n` | `n` versions before `HEAD` |
+| `latest`, `main` | The newest version in the store |
+| `3f2a9c…` | Commit ID; any unambiguous prefix of at least 4 hex characters |
+| `Release-1.0` | A tag |
+
+### Ignored files
+
+Always ignored: Office/SolidWorks owner files (`~$*`), `*.tmp`, `*.bak`, `*.swbak`, `*.lck`, `*.swp`, Inventor's `OldVersions/`, `Thumbs.db`, `desktop.ini`, `.DS_Store`, `*.lnk`. Additional patterns go into `.crateignore`, which uses gitignore syntax and is case-insensitive.
+
+The author is recorded as `USERNAME@COMPUTERNAME`. Set the environment variable `CRATE_AUTHOR` to override it.
+
+---
+
+## Working in a team
+
+Every user has a full local repository and commits locally, also offline. `push` and `pull` synchronize with a shared remote.
 
 ```bat
-REM Einmalig: vorhandenes Repo auf das Netzlaufwerk hochladen
-crate remote add origin "\\server\cad\mein-produkt"
+REM once: publish an existing repository
+crate remote add origin "\\fileserver\cad\gearbox"
 crate push
 
-REM Kollegen holen sich eine eigene Kopie
-crate clone "\\server\cad\mein-produkt" "C:\CAD\Mein Produkt"
+REM colleagues
+crate clone "\\fileserver\cad\gearbox" "C:\CAD\Gearbox"
 
-REM Täglicher Ablauf
+REM daily loop
 crate pull
-crate lock Rahmen\Strebe.SLDPRT -m "Überarbeite Bohrungen"
-REM ... bearbeiten ...
-crate commit -m "Bohrungen 8 mm"
+crate lock Frame\Strut.SLDPRT -m "reworking bores"
+REM edit the part in CAD, then
+crate commit -m "Bores 8 mm"
 crate push
-crate unlock Rahmen\Strebe.SLDPRT
+crate unlock Frame\Strut.SLDPRT
 ```
 
-Was dabei passiert:
+- **Locks** live on `origin` once it is configured, so the whole team sees them. `commit` and `push` both check them.
+- **`push`** is fast-forward only. If someone else pushed first, it is rejected and you run `crate pull` first.
+- **`pull`** fast-forwards when possible. If both sides have committed, local commits are rebased onto the remote ones automatically, as long as the two sides changed different files. Uncommitted edits to files that the pull does not touch are kept.
+- **Conflicts** happen when the same file was changed on both sides. Binary CAD files cannot be merged, so you choose:
 
-- **`push`** lädt nur fehlende Datenblöcke hoch und veröffentlicht die Versionen erst danach. Hat jemand anderes inzwischen gepusht, wird `push` abgelehnt: dann zuerst `crate pull`.
-- **`pull`** holt neue Versionen und aktualisiert den Arbeitsordner. Ungespeicherte Änderungen an Dateien, die der Pull nicht betrifft, bleiben erhalten.
-- **Wenn beide Seiten committet haben**, setzt `pull` die eigenen Versionen automatisch auf den neuen Stand, solange unterschiedliche Dateien geändert wurden. Danach `crate push`.
-- **Wurde dieselbe Datei auf beiden Seiten geändert**, ist das ein Konflikt, denn CAD-Dateien lassen sich nicht zusammenführen. Für die Auflösung gibt es drei Optionen:
-  - `crate pull --keep-both` behält beide Versionen. Die vom Remote bleibt unter dem Originalnamen, die eigene wird als Kopie daneben gespeichert und mit eingecheckt, z. B. `Strebe (Konflikt nico).SLDPRT`. Baugruppen verweisen weiter auf den Originalnamen.
-  - `crate pull --mine` behält die eigene Version.
-  - `crate pull --theirs` übernimmt die Version vom Remote und verwirft die eigene.
-- **Sperren** liegen auf `origin`, sobald es eingerichtet ist, und sind damit für alle sichtbar. `lock`, `unlock` und `locks` brauchen dafür Zugriff auf `origin`. `commit` und `push` brechen ab, wenn geänderte Dateien von jemand anderem gesperrt sind. Mit `--force` lässt sich das übergehen.
-- **Tags** werden mit übertragen. Ein Tag, der auf dem Ziel schon auf eine andere Version zeigt, wird nie verschoben.
+  | Flag | Result |
+  | --- | --- |
+  | `--keep-both` | The remote version keeps the path, yours is committed next to it as `Strut (Konflikt nico).SLDPRT`. Assemblies keep referencing the original path. |
+  | `--mine` | Your version wins. The other one stays in the history. |
+  | `--theirs` | The remote version wins. Your change to that file is dropped. |
 
-Als Remote-URL geht ein leerer oder neuer Ordner, in den beim ersten `push` ein reiner Speicher ohne Arbeitsdateien angelegt wird, oder ein anderes crate-Repo. Alternativ können alle direkt mit `crate init --store "\\server\cad\mein-produkt"` denselben Speicher nutzen, dann ohne `push` und `pull`.
+Instead of push/pull, all users can also share one store directly with `crate init --store "\\fileserver\cad\gearbox"`. Every commit is then immediately visible to everyone.
 
-Als Autor wird `BENUTZER@RECHNER` eingetragen. Mit der Umgebungsvariablen `CRATE_AUTHOR` lässt sich ein anderer Name setzen.
+---
 
-## Dateien ausschließen
+## Design
 
-Diese Dateien werden immer ignoriert:
+### Repository layout
 
-- Office- und SolidWorks-Sperrdateien (`~$*`)
-- `*.tmp`, `*.bak`, `*.swbak`, `*.lck`, `*.swp`
-- `OldVersions/`
-- `Thumbs.db`, `desktop.ini`, `.DS_Store`, `*.lnk`
-
-Eigene Regeln kommen in die Datei `.crateignore` im Hauptordner. Die Syntax ist dieselbe wie bei `.gitignore`, Groß- und Kleinschreibung wird ignoriert:
-
-```gitignore
-Exporte/
-*.log
+```
+<project>/
+├── .crateignore
+├── …CAD files…
+└── .crate/
+    ├── config.json        store location, remotes
+    ├── HEAD               commit the working folder is based on (local)
+    ├── stat-cache.json    path → (size, mtime, hash, chunk list)
+    └── objects/           the store (may live elsewhere, see --store)
+        ├── chunks/ab/cdef…    file content, addressed by BLAKE3
+        ├── manifests/<id>     snapshot: path → (size, mtime, hash, chunks)
+        ├── commits/<id>       parent, manifest, author, time, message, stats
+        ├── wal/00000000000000000042   immutable log entries
+        └── index              materialized view: head, tags, locks, seq
 ```
 
-## Funktionsweise
+All objects except `index` are immutable and named by the BLAKE3 hash of their content, so the store forms a Merkle DAG: commit → manifest → chunks. Manifests and commits are deterministic JSON (paths are kept sorted). Their ID is the hash of that JSON, and they are stored compressed.
 
-- **Chunking:** Dateien werden mit FastCDC in Stücke von etwa 1 MB zerlegt (256 KB bis 4 MB). Jedes Stück wird über seinen BLAKE3-Hash adressiert und nur einmal gespeichert, wenn möglich mit Deflate komprimiert.
-- **Manifest und Commit:** Ein Manifest listet alle Dateien einer Version mit ihren Stücken. Ein Commit verweist auf das Manifest und auf die vorherige Version.
-- **Write-Ahead-Log (WAL):** Commits, Tags und Sperren werden als Einträge an ein Log angehängt. Daraus entsteht der aktuelle Index mit neuester Version, Tags und Sperren.
-- **Stat-Cache:** Dateien, deren Größe und Änderungszeit gleich geblieben sind, werden nicht neu eingelesen.
+### Content-defined chunking
 
-## Einschränkungen
+Files are split with **FastCDC** (the 2020 variant, with normalized chunking) into chunks of 256 KiB min / 1 MiB average / 4 MiB max. Boundaries come from a rolling gear hash over the content, not from fixed offsets. Inserting or deleting bytes therefore shifts boundaries only locally, and all other chunks keep their hashes. With fixed-size blocks, an insertion would invalidate every block after it.
 
-- Keine Branches und kein Merge; die Historie ist linear.
-- Remotes sind bisher nur Ordner und Netzlaufwerke. S3 und ein eigener Server (HTTP) sind vorgesehen, aber noch nicht umgesetzt.
-- Keine Benutzerverwaltung oder Zugriffsrechte; der Autor wird vom Client angegeben.
+In practice:
 
-## Entwicklung
+- A local edit to a file of any size stores roughly the changed bytes, rounded up to a few chunks of about 1 MiB.
+- Deduplication works across versions and across files: copying an assembly under a new name costs almost nothing.
+- Each chunk is stored with a 1-byte codec tag: Deflate (level 6), or raw if compression saves less than 5 %. Already compressed CAD containers and ZIP archives are therefore not compressed a second time.
 
-```bat
+Chunks are verified against their hash when read. A restored file is also checked against its whole-file BLAKE3 hash.
+
+### Change detection
+
+`status` and `commit` scan the folder and use a **stat cache**. A file whose size and nanosecond mtime match the cache is not read again. Changed files are hashed in parallel with Rayon. A no-op `status` on a large project therefore costs one directory walk.
+
+### Concurrency: a CAS-linearized write-ahead log
+
+Every state change is an entry in an append-only log: commit, tag, lock or unlock. Appending works like this:
+
+1. Read `index` (sequence number `n`) and its version tag.
+2. Decide on the operation against that state, e.g. "file not locked by someone else" or "head is still my parent".
+3. Write entry `wal/n+1` with *put-if-absent*.
+4. Publish it by moving `index` from `n` to `n+1` with a single **compare-and-swap**. If the CAS fails, another writer won the race: re-read and retry from step 1.
+
+The CAS on one small object is the only point of coordination, so all writers are linearized into one total order. The index is only a materialized view: `verify` rebuilds it by replaying the WAL and compares the result. An entry whose writer crashed between steps 3 and 4 is detected as an orphan and discarded after a timeout.
+
+The store interface has the semantics of S3:
+
+- `get`, `put`, `put_if_absent`, `cas_put`, `list`, `delete`
+- `put_if_absent` and `cas_put` correspond to S3's conditional writes (`If-None-Match`, `If-Match`)
+
+The local implementation follows the same semantics:
+
+- **Atomic writes:** `fsync` to a temporary file, then rename.
+- **`put_if_absent`:** creating a hard link, which fails atomically if the target exists.
+- **`cas_put`:** an exclusive lock file with stale-lock recovery.
+
+This is why a plain SMB share is enough, and why an object-store backend is a drop-in addition.
+
+**Crash consistency.** Objects are always written bottom-up (chunks → manifest → commit) and become reachable only through a WAL entry. A crash at any point leaves at most unreferenced objects behind, and `gc` collects them. `gc` honors a grace period, because a concurrent writer's objects are unreferenced until it publishes.
+
+### Synchronization
+
+`push` and `pull` copy objects between two stores. Content addressing makes this a set difference: only chunks the target lacks are transferred, in parallel and verified. An interrupted transfer can simply be rerun. Commits are copied only after their data, and published on the target through the same WAL/CAS protocol. This gives:
+
+- **Fast-forward check:** `push` requires the remote head to be an ancestor of the local head. The CAS rejects a concurrent push that happens in between.
+- **File-level three-way rebase:** if the histories have diverged, `pull` finds the merge base *B* and replays each local commit's changes on top of the remote head *T*. A path is a conflict iff it changed in both B→local and B→T with a different result. Identical changes on both sides are not conflicts. Non-conflicting commits are rewritten with new parents. Commits whose changes become empty are dropped.
+- **Lock checks:** locks are re-checked inside the CAS decision, so a lock taken during an upload still blocks publication.
+
+Pre-rebase commits stay referenced by the WAL, so `gc` never deletes data that once was committed.
+
+---
+
+## Limitations and roadmap
+
+- **Linear history.** There are no branches yet, and merging is at file granularity only. Merging inside CAD files would need vendor APIs or a parametric data model.
+- **Remote types.** Remotes are folders and network shares for now. An S3 backend and an HTTP protocol, as the basis for a hosted service, are planned. Both fit the existing store interface.
+- **Identity.** The client asserts the author, and there is no access control. That requires a server.
+- **Tags.** Tag deletions are not propagated by `push` / `pull`.
+
+---
+
+## Development
+
+```bash
 cargo build
-cargo test
+cargo test            # unit tests + CLI integration tests (tests/cli.rs)
+cargo build --release
 ```
+
+Source map:
+
+| Module | Responsibility |
+| --- | --- |
+| `chunk.rs` | FastCDC chunking, codec, hashing, restore |
+| `model.rs` | Manifest and commit objects, diffs |
+| `store/` | `BlobStore` trait and the local filesystem implementation |
+| `wal.rs` | Write-ahead log, index, CAS append, replay |
+| `scan.rs` | Folder scan, ignore rules, stat cache |
+| `repo.rs` | Repository discovery, configuration, revision resolution |
+| `sync.rs` | Object transfer, ancestry, publishing for push/pull |
+| `commands/` | One file per CLI command |
+
+---
+
+## License
+
+Copyright © 2026 Nicolas Wörmann.
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
