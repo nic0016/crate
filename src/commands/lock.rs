@@ -9,6 +9,7 @@ use crate::wal::{self, LockInfo, Op};
 
 pub fn lock(cwd: &Path, paths: &[String], message: Option<String>) -> Result<()> {
     let repo = Repo::discover(cwd)?;
+    let store = repo.lock_store()?;
     let me = author();
     let head = repo.head_manifest()?;
     for input in paths {
@@ -16,11 +17,11 @@ pub fn lock(cwd: &Path, paths: &[String], message: Option<String>) -> Result<()>
         if !head.files.contains_key(&path) && !scan::abs_path(&repo.root, &path).is_file() {
             bail!("{path} existiert nicht");
         }
-        if repo.index()?.locks.get(&path).is_some_and(|l| l.owner == me) {
+        if wal::load_index(store.as_ref())?.0.locks.get(&path).is_some_and(|l| l.owner == me) {
             println!("{path} ist bereits von dir gesperrt.");
             continue;
         }
-        wal::append(repo.store(), &me, |idx| {
+        wal::append(store.as_ref(), &me, |idx| {
             if let Some(l) = idx.locks.get(&path) {
                 bail!("{path} ist bereits gesperrt von {} (seit {})", l.owner, l.since.with_timezone(&Local).format("%d.%m.%Y %H:%M"));
             }
@@ -33,10 +34,11 @@ pub fn lock(cwd: &Path, paths: &[String], message: Option<String>) -> Result<()>
 
 pub fn unlock(cwd: &Path, paths: &[String], force: bool) -> Result<()> {
     let repo = Repo::discover(cwd)?;
+    let store = repo.lock_store()?;
     let me = author();
     for input in paths {
         let path = repo.to_repo_path(input)?;
-        wal::append(repo.store(), &me, |idx| match idx.locks.get(&path) {
+        wal::append(store.as_ref(), &me, |idx| match idx.locks.get(&path) {
             None => bail!("{path} ist nicht gesperrt"),
             Some(l) if l.owner != me && !force => {
                 bail!("{path} ist von {} gesperrt (mit --force trotzdem freigeben)", l.owner)
@@ -50,7 +52,7 @@ pub fn unlock(cwd: &Path, paths: &[String], force: bool) -> Result<()> {
 
 pub fn list(cwd: &Path) -> Result<()> {
     let repo = Repo::discover(cwd)?;
-    let index = repo.index()?;
+    let (index, _) = wal::load_index(repo.lock_store()?.as_ref())?;
     if index.locks.is_empty() {
         println!("Keine Sperren.");
     }

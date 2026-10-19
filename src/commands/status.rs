@@ -36,10 +36,11 @@ pub fn run(cwd: &Path) -> Result<()> {
         print_changes(&state.changes, |p| state.head.files.get(p).map(|f| f.size), |p| state.size_of(p));
     }
 
-    if !index.locks.is_empty() {
+    let locks = repo.locks()?;
+    if !locks.is_empty() {
         let me = author();
         println!("\nGesperrte Dateien:");
-        for (path, info) in &index.locks {
+        for (path, info) in &locks {
             let who = if info.owner == me { "von dir".to_string() } else { format!("von {}", info.owner) };
             let changed = state.changes.iter().any(|(p, _)| p == path);
             let warn = if changed && info.owner != me { "  ACHTUNG: lokal geändert, aber fremd gesperrt" } else { "" };

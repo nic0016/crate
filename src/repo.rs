@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -6,9 +7,10 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Commit, Manifest};
+use crate::remote;
 use crate::scan::StatCache;
 use crate::store::{BlobStore, LocalFsStore};
-use crate::wal::{self, Index};
+use crate::wal::{self, Index, LockInfo};
 
 pub const REPO_DIR: &str = ".crate";
 pub const IGNORE_FILE: &str = ".crateignore";
@@ -20,15 +22,42 @@ pub enum StoreConfig {
     Local { path: String },
 }
 
+impl StoreConfig {
+    pub fn resolve(&self, repo_dir: &Path) -> PathBuf {
+        match self {
+            StoreConfig::Local { path } => {
+                let p = Path::new(path);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    repo_dir.join(p)
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: u32,
     pub store: StoreConfig,
+    /// Name -> URL of other stores used by `push` and `pull`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remotes: BTreeMap<String, String>,
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Config> {
+        let data = fs::read(path).with_context(|| format!("{} lesen", path.display()))?;
+        serde_json::from_slice(&data).context("config.json ist ungültig")
+    }
 }
 
 pub struct Repo {
     pub root: PathBuf,
     pub dir: PathBuf,
+    pub config: Config,
+    pub store_path: PathBuf,
     pub store: Arc<dyn BlobStore>,
 }
 
@@ -44,7 +73,7 @@ impl Repo {
             Some(p) => std::path::absolute(p)?.to_string_lossy().into_owned(),
             None => "objects".to_string(),
         };
-        let config = Config { version: 1, store: StoreConfig::Local { path } };
+        let config = Config { version: 1, store: StoreConfig::Local { path }, remotes: BTreeMap::new() };
         fs::write(dir.join("config.json"), serde_json::to_vec_pretty(&config)?)?;
         fs::write(dir.join("HEAD"), "")?;
         Self::open_at(root)
@@ -67,18 +96,55 @@ impl Repo {
 
     fn open_at(root: PathBuf) -> Result<Repo> {
         let dir = root.join(REPO_DIR);
-        let config: Config = serde_json::from_slice(&fs::read(dir.join("config.json"))?).context("config.json ist ungültig")?;
-        let store: Arc<dyn BlobStore> = match &config.store {
-            StoreConfig::Local { path } => {
-                let p = Path::new(path);
-                Arc::new(LocalFsStore::open(if p.is_absolute() { p.to_path_buf() } else { dir.join(p) })?)
-            }
-        };
-        Ok(Repo { root, dir, store })
+        let config = Config::load(&dir.join("config.json"))?;
+        let store_path = config.store.resolve(&dir);
+        let store: Arc<dyn BlobStore> = Arc::new(LocalFsStore::open(store_path.clone())?);
+        Ok(Repo { root, dir, config, store_path, store })
+    }
+
+    pub fn save_config(&self) -> Result<()> {
+        fs::write(self.dir.join("config.json"), serde_json::to_vec_pretty(&self.config)?)?;
+        Ok(())
     }
 
     pub fn store(&self) -> &dyn BlobStore {
         self.store.as_ref()
+    }
+
+    /// Opens the store behind a configured remote. Only `push` may create it.
+    pub fn open_remote(&self, name: &str, create: bool) -> Result<Arc<dyn BlobStore>> {
+        let url = self.config.remotes.get(name).with_context(|| {
+            format!("Remote {name} ist nicht eingerichtet. Einrichten mit `crate remote add {name} <ordner>`.")
+        })?;
+        let path = remote::store_path(url)?;
+        if !create && !path.is_dir() {
+            bail!("Remote {name} ({url}) ist nicht erreichbar");
+        }
+        let store = LocalFsStore::open(path.clone())?;
+        if fs::canonicalize(&path)? == fs::canonicalize(&self.store_path)? {
+            bail!("Remote {name} zeigt auf den eigenen Speicher dieses Repos");
+        }
+        Ok(Arc::new(store))
+    }
+
+    /// Where locks live: on `origin` if configured, so the whole team sees them.
+    pub fn lock_store(&self) -> Result<Arc<dyn BlobStore>> {
+        if self.config.remotes.contains_key("origin") {
+            self.open_remote("origin", false)
+        } else {
+            Ok(self.store.clone())
+        }
+    }
+
+    /// Current locks; falls back to the local view if `origin` is unreachable.
+    pub fn locks(&self) -> Result<BTreeMap<String, LockInfo>> {
+        match self.lock_store().and_then(|s| Ok(wal::load_index(s.as_ref())?.0.locks)) {
+            Ok(locks) => Ok(locks),
+            Err(e) => {
+                eprintln!("Warnung: Sperren auf origin nicht abrufbar ({e:#}).");
+                Ok(self.index()?.locks)
+            }
+        }
     }
 
     /// The commit the working directory is based on (local, like Git's HEAD).

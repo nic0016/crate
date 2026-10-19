@@ -1,9 +1,8 @@
-use std::fs;
 use std::path::Path;
 
 use anyhow::{bail, Result};
 
-use super::{materialize, short, WorkState};
+use super::{materialize, remove_tracked, short, WorkState};
 use crate::repo::Repo;
 use crate::scan;
 
@@ -36,17 +35,8 @@ pub fn run(cwd: &Path, rev: &str, force: bool) -> Result<()> {
     // Remove files tracked in the old version but absent in the target. Untracked files stay.
     let mut removed = 0;
     for path in state.head.files.keys().filter(|p| !target.files.contains_key(*p)) {
-        let abs = scan::abs_path(&repo.root, path);
-        if abs.exists() {
-            fs::remove_file(&abs)?;
+        if remove_tracked(&repo, path)? {
             removed += 1;
-            let mut dir = abs.parent();
-            while let Some(d) = dir {
-                if d == repo.root || fs::remove_dir(d).is_err() {
-                    break;
-                }
-                dir = d.parent();
-            }
         }
         state.cache.files.remove(path);
     }

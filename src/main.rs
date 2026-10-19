@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use cad_crate::commands;
+use cad_crate::commands::pull::Resolve;
 
 #[derive(Parser)]
 #[command(name = "crate", version, about = "Versionskontrolle für CAD-Daten", long_about = None)]
@@ -104,6 +105,48 @@ enum Command {
         #[arg(long, default_value_t = 60)]
         grace: u64,
     },
+    /// Listet Remotes (andere Speicherorte für push/pull) oder richtet sie ein
+    Remote {
+        #[command(subcommand)]
+        action: Option<RemoteAction>,
+    },
+    /// Lädt lokale Versionen und Tags auf ein Remote hoch
+    Push {
+        #[arg(default_value = "origin")]
+        remote: String,
+        /// Auch hochladen, wenn geänderte Dateien dort von anderen gesperrt sind
+        #[arg(long)]
+        force: bool,
+    },
+    /// Holt neue Versionen von einem Remote und aktualisiert den Arbeitsordner
+    Pull {
+        #[arg(default_value = "origin")]
+        remote: String,
+        /// Bei Konflikten die eigene Version behalten
+        #[arg(long, conflicts_with_all = ["theirs", "keep_both"])]
+        mine: bool,
+        /// Bei Konflikten die Version vom Remote übernehmen
+        #[arg(long, conflicts_with = "keep_both")]
+        theirs: bool,
+        /// Bei Konflikten beide behalten: eigene Version als Kopie "Name (Konflikt Benutzer).ext"
+        #[arg(long)]
+        keep_both: bool,
+    },
+    /// Kopiert ein Remote in einen neuen Ordner
+    Clone {
+        url: String,
+        /// Zielordner (Standard: Name des Remote-Ordners)
+        #[arg(value_name = "ORDNER")]
+        target: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteAction {
+    /// Richtet ein Remote ein (Ordner oder Netzlaufwerk)
+    Add { name: String, url: String },
+    /// Entfernt ein Remote (die Daten dort bleiben erhalten)
+    Remove { name: String },
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
@@ -128,6 +171,22 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Wal { limit } => commands::verify::wal(&cwd, limit),
         Command::Verify { full } => commands::verify::run(&cwd, full),
         Command::Gc { dry_run, grace } => commands::gc::run(&cwd, dry_run, grace),
+        Command::Remote { action } => match action {
+            None => commands::remote::list(&cwd),
+            Some(RemoteAction::Add { name, url }) => commands::remote::add(&cwd, &name, &url),
+            Some(RemoteAction::Remove { name }) => commands::remote::remove(&cwd, &name),
+        },
+        Command::Push { remote, force } => commands::push::run(&cwd, &remote, force),
+        Command::Pull { remote, mine, theirs, keep_both } => {
+            let resolve = match (mine, theirs, keep_both) {
+                (true, _, _) => Some(Resolve::Mine),
+                (_, true, _) => Some(Resolve::Theirs),
+                (_, _, true) => Some(Resolve::KeepBoth),
+                _ => None,
+            };
+            commands::pull::run(&cwd, &remote, resolve)
+        }
+        Command::Clone { url, target } => commands::clone::run(&cwd, &url, target.as_deref()),
     }
 }
 

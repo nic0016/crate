@@ -1,10 +1,14 @@
 pub mod checkout;
+pub mod clone;
 pub mod commit;
 pub mod diff;
 pub mod gc;
 pub mod init;
 pub mod lock;
 pub mod log;
+pub mod pull;
+pub mod push;
+pub mod remote;
 pub mod restore;
 pub mod status;
 pub mod tag;
@@ -19,7 +23,7 @@ use anyhow::{Context, Result};
 
 use crate::cad::{human_delta, human_size, Category};
 use crate::chunk;
-use crate::model::{diff_maps, Change, FileEntry, Manifest};
+use crate::model::{diff_manifests, diff_maps, Change, FileEntry, Manifest};
 use crate::repo::Repo;
 use crate::scan::{self, CacheEntry, StatCache, WorkFile};
 
@@ -91,6 +95,47 @@ pub fn materialize(repo: &Repo, entry: &FileEntry, dest: &Path) -> Result<CacheE
     }
     let meta = fs::metadata(dest)?;
     Ok(CacheEntry { size: meta.len(), mtime: scan::mtime_of(&meta), hash: entry.hash.clone(), chunks: Some(entry.chunks.clone()) })
+}
+
+/// Deletes a tracked file and any directories that became empty.
+pub fn remove_tracked(repo: &Repo, path: &str) -> Result<bool> {
+    let abs = scan::abs_path(&repo.root, path);
+    if !abs.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&abs)?;
+    let mut dir = abs.parent();
+    while let Some(d) = dir {
+        if d == repo.root || fs::remove_dir(d).is_err() {
+            break;
+        }
+        dir = d.parent();
+    }
+    Ok(true)
+}
+
+/// Brings the files that differ between `old` and `new` to the state of `new`.
+/// All other files, including local edits to them, are left alone.
+pub fn apply_update(repo: &Repo, state: &mut WorkState, old: &Manifest, new: &Manifest) -> Result<(usize, usize)> {
+    let (mut written, mut removed) = (0, 0);
+    for (path, _) in diff_manifests(old, new) {
+        match new.files.get(&path) {
+            Some(entry) => {
+                if state.hashes.get(&path) != Some(&entry.hash) {
+                    let fresh = materialize(repo, entry, &scan::abs_path(&repo.root, &path))?;
+                    state.cache.files.insert(path, fresh);
+                    written += 1;
+                }
+            }
+            None => {
+                if remove_tracked(repo, &path)? {
+                    removed += 1;
+                }
+                state.cache.files.remove(&path);
+            }
+        }
+    }
+    Ok((written, removed))
 }
 
 /// Selects manifest entries matching `prefix` (exact file or directory).

@@ -67,7 +67,8 @@ impl FileLock {
                     let _ = writeln!(f, "{}", std::process::id());
                     return Ok(Self { path });
                 }
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // Windows reports PermissionDenied while another process is deleting the file.
+                Err(e) if matches!(e.kind(), ErrorKind::AlreadyExists | ErrorKind::PermissionDenied) => {
                     let stale = fs::metadata(&path)
                         .and_then(|m| m.modified())
                         .ok()

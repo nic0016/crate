@@ -85,9 +85,10 @@ pub fn run(cwd: &Path, message: &str, force: bool) -> Result<()> {
         return Ok(());
     }
 
+    let locks = repo.locks()?;
     let foreign: Vec<String> = changes
         .iter()
-        .filter_map(|(p, _)| index.locks.get(p).filter(|l| l.owner != me).map(|l| format!("{p} (gesperrt von {})", l.owner)))
+        .filter_map(|(p, _)| locks.get(p).filter(|l| l.owner != me).map(|l| format!("{p} (gesperrt von {})", l.owner)))
         .collect();
     if !foreign.is_empty() && !force {
         bail!("Geänderte Dateien sind von anderen gesperrt:\n  {}\nMit --force trotzdem committen.", foreign.join("\n  "));
